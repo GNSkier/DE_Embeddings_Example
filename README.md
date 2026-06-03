@@ -2,6 +2,14 @@
 
 A local **Redis Streams** cache deployed with Docker. It mimics classic pub/sub (`PUBLISH` / `SUBSCRIBE`) while keeping recent messages on disk—handy for development, smoke tests, and pipelines that need short replay windows without a full message broker.
 
+On top of that, this repo is an end-to-end **RAG demo**: seed a containerized **ChromaDB** with embeddings from a dataset, stream new messages through Redis into Chroma, and query it all from a **Streamlit** app backed by a local **Qwen** model (via Ollama).
+
+```
+dataset ──(bulk seed)──┐
+                       ▼
+Redis stream ─(worker)─► embed ─► ChromaDB ◄─ query ◄─ Streamlit ─► Ollama (Qwen)
+```
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2 (`docker compose`)
@@ -110,6 +118,98 @@ python scripts/demo_subscribe.py events 0
 
 Ensure `REDIS_URL` in `.env` matches your host if Redis is not on `localhost`.
 
+## Showcase runbook (live student demo, no HuggingFace token needed)
+
+A live demo must not stall on a network download. So split the work in two:
+
+**Prep — before the session (one-time, off the clock).** Seed ChromaDB once. The vectors
+persist in the `chroma_data` Docker volume, so this only happens once per machine.
+
+```bash
+docker compose up -d                                   # redis + chromadb
+# Download is the slow part (rate-limited without a token, but FREE either way).
+# Cache the slice so it never re-downloads, then the demo is fully offline:
+DATASET_STREAMING=false MAX_DOCS=30000 python scripts/load_dataset_to_chroma.py
+```
+
+A free token (`HF_TOKEN`, https://huggingface.co/settings/tokens) just makes this download
+faster — it is **not required** and there is **nothing to pay**. Tune `MAX_DOCS` to how
+much you want seeded; the embeddings persist regardless.
+
+**Showcase — during the session (fast, no HuggingFace).** Chroma is already seeded, so you
+only run the instant parts:
+
+1. **Pub/sub → live embed:** publish a message and watch the worker embed it into Chroma.
+2. **RAG app:** ask the Streamlit app a question; it retrieves from Chroma and answers via
+   the students' local Qwen model.
+
+Nothing in the showcase touches HuggingFace, so the throttle can't bite mid-demo.
+
+> Measured on Apple Silicon: embedding sustains ~140 docs/s, retrieval + a Qwen answer is
+> a couple of seconds. The only slow step (dataset download) is done in prep.
+
+## RAG pipeline: dataset → ChromaDB → query
+
+The pieces below share `rag_common.py` (one embedding model — `all-MiniLM-L6-v2` — for
+both ingest and query, so all vectors live in the same space). Configure everything via
+`.env` (see `.env.example`). Make sure the stack is up first: `docker compose up -d`.
+
+### 1. Seed ChromaDB from the dataset (bulk load)
+
+Streams `ianncity/KIMI-K2.5-1000000x`, embeds rows, and upserts them into Chroma. It
+**streams** the dataset, so only the rows you embed are downloaded — not the full ~20 GB.
+
+```bash
+# smoke test the path with a tiny slice first
+MAX_DOCS=200 python scripts/load_dataset_to_chroma.py
+
+# tuned default (~45-min demo budget); set MAX_DOCS≈199000 for a literal 50% slice
+python scripts/load_dataset_to_chroma.py
+```
+
+`MAX_DOCS` controls scope (default `30000`). Tune it to your machine — long reasoning
+traces embed slower than short text.
+
+### Timing (measured on Apple Silicon / MPS)
+
+- **Compute is fast.** Embedding sustains **~140 docs/s** after a one-time ~15s model
+  load (5,000 docs in ~58s). At that rate a literal 50% slice (~199k docs) is ~24 min.
+- **The bottleneck is the HF download, not compute.** With **no `HF_TOKEN`**, streaming
+  the dataset is rate-limited (~2–3 MB/s) and buffers a large parquet shard before
+  yielding the first rows — in testing the first batch hadn't landed after 4+ min.
+  **Set `HF_TOKEN`** (see `.env`) to stay download-unbound; then wall-clock tracks the
+  ~140 docs/s compute rate and the half-subset comfortably fits a 45-minute budget.
+- If you can't use a token, keep `MAX_DOCS` modest (e.g. 30k) or pre-cache the dataset
+  once with `huggingface-cli download`.
+
+### 2. Stream new messages into ChromaDB (the live worker)
+
+This closes the loop Grant's demos start: a published message is **consumed, transformed,
+embedded, and stored** in Chroma. Run the worker, then publish to the same channel.
+
+```bash
+# terminal 1 — worker (subscribes to the `embeddings` channel, replays from start)
+python scripts/embed_worker.py embeddings
+
+# terminal 2 — publish a chat-shaped row (or any text)
+python scripts/demo_publish.py embeddings '{"messages":[{"role":"user","content":"What is a binary search tree?"}]}'
+python scripts/demo_publish.py embeddings "plain text also works"
+```
+
+The worker logs each upsert and the running collection count.
+
+### 3. Query it: Streamlit RAG app
+
+Embeds your question, retrieves top-k context from Chroma, and answers with a local Qwen
+model served by **Ollama**.
+
+```bash
+ollama run qwen2.5                      # pull/serve the model (any Qwen tag; set OLLAMA_MODEL)
+streamlit run app/streamlit_app.py
+```
+
+The sidebar shows the collection size and model; retrieved sources are shown per answer.
+
 ## Use in your own code
 
 Import `stream_pubsub` from the repo root (or add the project to `PYTHONPATH`):
@@ -143,7 +243,11 @@ Data is stored in the Docker volume `redis-stream-data` (see `docker-compose.yml
 | `docker-compose.yml` | Redis 7 Alpine service, healthcheck, persistent volume |
 | `redis/redis.conf` | AOF persistence, dev memory cap (256MB) |
 | `stream_pubsub.py` | `publish` / `subscribe` wrapper over `XADD` / `XREAD` |
+| `rag_common.py` | Shared embedding + Chroma helpers and the row→document transform |
 | `scripts/demo_publish.py` | CLI publish smoke test |
 | `scripts/demo_subscribe.py` | CLI subscribe smoke test |
-| `requirements.txt` | Python deps (`redis`, `chromadb`, `datasets`, `sentence-transformers`) |
+| `scripts/load_dataset_to_chroma.py` | Bulk-seed ChromaDB from the dataset (streaming) |
+| `scripts/embed_worker.py` | Consume stream → transform → embed → store in ChromaDB |
+| `app/streamlit_app.py` | RAG chat app (ChromaDB retrieval + Qwen via Ollama) |
+| `requirements.txt` | Python deps (`redis`, `chromadb`, `datasets`, `sentence-transformers`, `streamlit`, `requests`) |
 | `.env.example` | Sample environment variables |

@@ -3,3 +3,10 @@
 __pycache__/
 *.pyc
 .Python
+
+# Persisted ChromaDB vector store — generated artifact, reproducible via the seed script.
+# Don't commit; distribute out-of-band (zip/shared drive) if pre-seeding student machines.
+chroma_data/
+
+# macOS junk
+.DS_Store
