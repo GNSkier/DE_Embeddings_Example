@@ -2,3 +2,5 @@ redis>=5.0,<6
 chromadb
 datasets
 sentence-transformers
+streamlit
+requests
