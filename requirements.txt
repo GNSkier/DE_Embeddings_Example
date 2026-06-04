@@ -4,3 +4,4 @@ datasets
 sentence-transformers
 streamlit
 requests
+ollama

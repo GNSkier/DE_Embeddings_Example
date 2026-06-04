@@ -10,26 +10,36 @@ dataset ──(bulk seed)──┐
 Redis stream ─(worker)─► embed ─► ChromaDB ◄─ query ◄─ Streamlit ─► Ollama (Qwen)
 ```
 
+# DE_Embeddings_Example
+
+A local **Redis Streams** cache deployed with Docker. It mimics classic pub/sub (`PUBLISH` / `SUBSCRIBE`) while keeping recent messages on disk—handy for development, smoke tests, and pipelines that need short replay windows without a full message broker. A chromaDB instance will be created that is initially partially filled. As time goes on, messages will be streamed through redis, updating the vector store. At the same time, users can prompt an LLM that references this vector data store. They should see that asking the same question before a particular message is ingested, versus after that message is ingested, generally leads to different outcomes.
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2 (`docker compose`)
+- [Ollama](https://ollama.com/download) and make sure to sign into your account with `ollama signin`, and of course if you haven't made an account, do so
 - Optional: Python 3.10+ for the helper scripts and `stream_pubsub.py`
+
+0. Set up environment:
+   - a. In your conda terminal, run `conda create -n stream_rag`. This will create a conda environment for you to utilize for the purposes of our demonstration.
+   - b. In the same terminal, run `conda activate stream_rag`, which will make sure your current python instance is using the environment we just created.
+   - c. Still in the same terminal, navigate to the directory that this repository has been loaded into. The current directory should look something like `.../DE_Embeddings_Example`. Once there, run `pip install -r requirements.txt`, which will install the required packages for this workshop.
 
 ## Deploy the stream cache
 
-1. Copy environment defaults (optional; compose works without `.env`):
+1. Start Docker Services (Redis + ChromaDB):
+   
+   [Docker](https://www.geeksforgeeks.org/devops/how-is-docker-different-from-a-virtual-machine/) is a tool that lets you run containers, that mimic the overall effect of virtual machines. In the `docker-compose.yml` file, the instructions for the docker engine to build/deploy these containers exist. You should see that we have two services that will be containerized: **`redis-stream-cache`** and **`chromadb`**.
 
-   ```bash
-   cp .env.example .env
-   ```
+   `redis-stream-cache` is the service that runs redis. This'll run messages back and forth from our local silo into the deployed chromadb instance. `chromadb` is the service that runs a local container for chromadb vector database. This will ingest the messages that are being served by redis.
 
-2. Start Redis:
+   **While in the `stream_rag` environment, and in the local directory to this project, please run**:
 
-   ```bash
-   docker compose up -d
-   ```
-
-3. Confirm the service is healthy:
+      ```
+      docker compose up -d
+      ```
+   This will launch the services we've been describing.
+   Confirm docker has built correctly by running the following commands in the same terminal
 
    ```bash
    docker compose ps
@@ -38,12 +48,135 @@ Redis stream ─(worker)─► embed ─► ChromaDB ◄─ query ◄─ Streaml
 
    Expect `PONG`. Redis is exposed on **`localhost:6379`** unless you change `REDIS_PORT` in `.env`.
 
-4. Stop when finished:
+## Semi-fill ChromaDB
 
+2. Preload Portion of the Dataset Into ChromaDB:
+   
+   The dataset we're using is the `ianncity/KIMI-K2.5-1000000x` one available on HuggingFace. It's accessible through packages you've ideally already installed for the environment you should be working in. We're hoping to load in **15k rows** of the data initially to the chromaDB.
+
+   You'll notice a file `scripts/load_dataset_to_chroma.py` that's for taking the data from the dataset then loading it into the containerized chromaDB. It does so through the following steps:
+   - Loads the data in cache
+   - Splits the data accordingly
+   - Connects to the ChromaDB Docker instance
+   - Uses a predefined chunking function
+   - Loads the chunks, and encodes them into ChromaDB
+
+   **Please run**:
+   ```
+   python scripts/load_dataset_to_chroma.py
+   ```
+
+## Test the 'Dumb' LLM
+
+3. Query the Semi-Filled LLM in Streamlit App:
+   
+   Right now, the chromaDB has been filled with the chunks we've already seeded earlier in [step 2](#Semi-fill_ChromaDB). We're going to launch the streamlit app, and through the interface there, we can run a query that prompts our locally hosted LLM. **Before doing this step, ensure Ollama is currently running and that you have the correct model**:
+   ```bash
+   ollama list
+   ```
+   This should return something like
+   ```bash
+   NAME              ID              SIZE      MODIFIED      
+   qwen2.5:latest    845dbda0ea48    4.7 GB    3 seconds ago  
+   ```
+
+   With that green light, we should be able to run the streamlit app. **Please run**:
+   ```bash
+   cd app # Change directory to the app
+   streamlit run streamlit_app.py
+   ```
+   The `streamlit_app.py` should look somewhat familiar to y'all. But it also references a few other scripts. Specifically, `rag_common.py` which creates a Chroma HTTP client. The docker compose we ran earlier then publishes it at the port we designated earlier. The `get_collection` function inside of `streamlit_appy.py` should connect to the Chroma container.
+
+   When you run any query in the streamlit app, `retrieve()` will embed the query, then checks which results inside of the Chroma instance are closest, then base its answer off of those retrieved results.
+
+   For testing purposes, let's demonstrate that the LLM can't answer this hyper-specific question, copy and paste it into the streamlit app and check its results:
+   ```
+   How is the Kholo species described in terms of appearance?
+   ```
+   The model should return something along the lines of not having enough context in order to answer appropriately. This question is related to material that is outside of its trained data. Y'all being experts on RAG now, know we can augment its data.
+
+   Run the following:
+   ```bash
+   cd .. # get back in the root directory (hopefully)
+   ```
+
+   You can close the app once you've confirmed this. In the terminal that you launched the app from, hit `CMD+C` or `CTRL+C` to stop the app from being hosted.
+
+## Stream New Data
+
+4. Start the Streaming Service:
+
+   Inside of `/scripts` is `publish_jsonl.py` and `subscribe_and_upsert.py`. The `publish_jsonl.py` script will take entries listed in the `pathfinder_rag_dataset.jsonl` and send them to any scripts that are currently listening to that publisher's topic. `subscriber_and_upsert.py` is a script that listens to the same topic that `publish_json.py` is publishing to. It then takes the message, and embeds it in Chroma.
+
+   For this next part, you'll need to have three terminals open:
+   1. Launch the subscriber:
+   ```bash
+   python scripts/subscribe_and_upsert.py
+   ```
+   You should see in the terminal, it prints out
+   ```
+   Listening on channel: ...
+   ```
+   Move onto the next step once you confirm it is running correctly.
+
+   2. Launch the publisher:
+   ```bash
+   python scripts/publish_jsonl.py
+   ```
+   Once this starts running, it should print out that it has published a message:
+   ```bash
+   published idx=0 id=1780528448212-0 (0.0% )
+   ```
+
+   3. Navigate back to the `app` folder and start the streamlit app:
+   ```bash
+   streamtlit run streamlit_app.py --no-reload # activate developer mode
+   ```
+
+   This whole process simulates what it is like to have a message be live streamed to a database, and ingesting it as time goes. Your LLM should now be able to give an answer for the strange question listed above (re-listed here for your convenience):
+   ```
+   How is the Kholo species described in terms of appearance?
+   ```
+
+   You can try this question **before** and **after** your publisher has reached 50% completion:
+   ```
+   What does Blessed Swiftness provide to the character?
+   ```
+
+   Finally, try this question **before** and **after** your publisher has reached 90% completion:
+   ```
+   What are the prices for WITCHWARG elixir?
+   ```
+
+   This should demonstrate that the Chroma is being updated over time. We are streaming updates to the Chroma database. We've achieved real-time knowledge.
+   
+   This could be useful for a startup like HealthWrite. The goal there was to allow patients to get summaries of their healthcare information, and give doctors ways to summarize their patient meetings. Once meeting has been transcribed, the message can be streamed to the database, allowing for the patient to almost instantly start running queries on the meeting they'd just had.
+
+   An alternative to this streamed RAG would be to batch the data (maybe something like nightly) and then retrain the LLM.
+
+   If we glowed this whole set up a bit more, we could set up topic specific scripts that could be ingested slightly differently. Maybe we need to consider information coming from the pharmacist, anasthesiologist, cardiologist, and oncologist differently, as well as any other healthcare professional. They could then point to different topics, which different scripts could manipulate accordingly.
+
+## Close the project
+
+5. Stop when finished:
+
+   Press `CMD+C` or `CTRL+C` on your terminals to stop the services.
+
+   In any, run the following commands to shut down the docker containers.
    ```bash
    docker compose down          # stop container, keep data volume
    docker compose down -v       # stop and delete persisted stream data
    ```
+
+## Configuration
+
+Set these in `.env` (see `.env.example`):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `REDIS_PORT` | `6379` | Host port mapped to the container |
+| `REDIS_URL` | `redis://localhost:6379/0` | Connection string for Python clients |
+| `REDIS_STREAM_PREFIX` | `pubsub` | Key prefix; channel `events` → stream `pubsub:events` |
 
 ## Configuration
 
