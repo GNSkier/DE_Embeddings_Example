@@ -1,7 +1,17 @@
+# Redis stream pub/sub
 redis>=5.0,<6
-chromadb
-datasets
-sentence-transformers
-streamlit
-requests
-ollama
+
+# Embeddings, ChromaDB, HuggingFace dataset ingest
+chromadb>=0.5,<2
+datasets>=2.18,<5
+sentence-transformers>=3.0,<6
+
+# Streamlit RAG UI + HTTP (Ollama chat API)
+streamlit>=1.28,<2
+requests>=2.31,<3
+
+# .env loading (llm_client, shared config)
+python-dotenv>=1.0,<2
+
+# Gemini when GEMINI_API_KEY is set (Ollama uses requests only)
+google-genai>=1.0,<2

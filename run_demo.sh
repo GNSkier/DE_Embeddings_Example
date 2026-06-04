@@ -20,6 +20,13 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 PY="$ROOT/.venv/bin/python"
 STREAMLIT="$ROOT/.venv/bin/streamlit"
 CHROMA="$ROOT/.venv/bin/chroma"
@@ -73,8 +80,10 @@ fi
 echo "python      : $($PY --version 2>&1)"
 echo "max_docs    : $MAX_DOCS"
 echo "collection  : $COLLECTION"
-echo "ollama model: $OLLAMA_MODEL"
-"$PY" -c "import chromadb, datasets, sentence_transformers, redis, streamlit, requests" \
+if [ -n "${GEMINI_API_KEY:-}" ]; then echo "llm backend: gemini (GEMINI_API_KEY set)"; else echo "llm backend: ollama"; fi
+echo "ollama model : $OLLAMA_MODEL"
+echo "gemini model : ${GEMINI_MODEL:-gemini-2.0-flash}"
+"$PY" -c "import chromadb, datasets, sentence_transformers, redis, streamlit, requests, dotenv" \
   && green "deps OK" || { red "missing deps — run: .venv/bin/pip install -r requirements.txt"; exit 1; }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,31 +170,36 @@ kill "$wpid" 2>/dev/null
 if [ "$a" -gt "$b" ]; then green "worker stored the message: $b → $a"; else red "no new doc — see /tmp/worker.log"; fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "5 · RAG query smoke test  (retrieve from Chroma → answer via Ollama '$OLLAMA_MODEL')"
-if ! curl -s localhost:11434/api/tags >/dev/null 2>&1; then
-  yellow "Ollama not reachable on :11434 — start it with 'ollama serve' / 'ollama run $OLLAMA_MODEL'. Skipping."
+step "5 · RAG query smoke test"
+skip_llm=0
+if [ -n "${GEMINI_API_KEY:-}" ]; then
+  green "using Gemini (GEMINI_API_KEY is set)"
+elif ! curl -s localhost:11434/api/tags >/dev/null 2>&1; then
+  yellow "GEMINI_API_KEY unset but Ollama not reachable on :11434 — skipping."
+  skip_llm=1
 else
   if ! curl -s localhost:11434/api/tags | grep -q "\"${OLLAMA_MODEL%%:*}"; then
     yellow "Model '$OLLAMA_MODEL' not found in Ollama. Pull it ('ollama pull $OLLAMA_MODEL') or pass --model <installed>. Trying anyway…"
   fi
+fi
+if [ "$skip_llm" = 0 ]; then
   pause
-  OLLAMA_MODEL="$OLLAMA_MODEL" CHROMA_COLLECTION="$COLLECTION" "$PY" - <<'PY'
-import os, requests
+  CHROMA_COLLECTION="$COLLECTION" "$PY" - <<'PY'
 from rag_common import embed_texts, get_collection
+from llm_client import complete_answer, provider_display
+
 q = "How do you reverse a linked list?"
 col = get_collection()
-res = col.query(query_embeddings=embed_texts([q]), n_results=3, include=["documents","distances"])
+res = col.query(query_embeddings=embed_texts([q]), n_results=3, include=["documents", "distances"])
 ctx = "\n\n---\n\n".join(res["documents"][0])
-print(f"query: {q}\nretrieved {len(res['documents'][0])} docs, distances={[round(d,3) for d in res['distances'][0]]}\n")
-model = os.environ["OLLAMA_MODEL"]
-r = requests.post("http://localhost:11434/api/chat", json={
-    "model": model,
-    "messages":[{"role":"system","content":"Answer using the context when relevant."},
-                {"role":"user","content":f"Context:\n{ctx[:4000]}\n\nQuestion: {q}"}],
-    "stream": False}, timeout=300)
-r.raise_for_status()
-print(f"=== {model} answer (first 500 chars) ===")
-print(r.json()["message"]["content"][:500])
+print(f"query: {q}\nretrieved {len(res['documents'][0])} docs, distances={[round(d, 3) for d in res['distances'][0]]}\n")
+prompt = f"Context:\n{ctx[:4000]}\n\nQuestion: {q}"
+answer = complete_answer(
+    prompt,
+    system="Answer using the context when relevant.",
+)
+print(f"=== {provider_display()} answer (first 500 chars) ===")
+print(answer[:500])
 PY
   green "RAG path verified."
 fi
@@ -193,6 +207,6 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 step "6 · Launch the Streamlit RAG app"
 echo "Opens at http://localhost:8501 — type a question, see retrieval + the streamed answer."
-echo "Using model: $OLLAMA_MODEL   (override: OLLAMA_MODEL=<name> ./run_demo.sh)"
+echo "LLM: Gemini if GEMINI_API_KEY is set in .env, else Ollama"
 pause
-OLLAMA_MODEL="$OLLAMA_MODEL" CHROMA_COLLECTION="$COLLECTION" exec "$STREAMLIT" run app/streamlit_app.py
+CHROMA_COLLECTION="$COLLECTION" exec "$STREAMLIT" run app/streamlit_app.py

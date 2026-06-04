@@ -2,22 +2,22 @@
 
 A local **Redis Streams** cache deployed with Docker. It mimics classic pub/sub (`PUBLISH` / `SUBSCRIBE`) while keeping recent messages on disk—handy for development, smoke tests, and pipelines that need short replay windows without a full message broker.
 
-On top of that, this repo is an end-to-end **RAG demo**: seed a containerized **ChromaDB** with embeddings from a dataset, stream new messages through Redis into Chroma, and query it all from a **Streamlit** app backed by a local **Qwen** model (via Ollama).
+On top of that, this repo is an end-to-end **RAG demo**: seed a containerized **ChromaDB** with embeddings from a dataset, stream new messages through Redis into Chroma, and query it all from a **Streamlit** app backed by an LLM—**Qwen** via local **Ollama** (default) or **Gemini** when `GEMINI_API_KEY` is set in `.env`.
 
 ```
 dataset ──(bulk seed)──┐
                        ▼
-Redis stream ─(worker)─► embed ─► ChromaDB ◄─ query ◄─ Streamlit ─► Ollama (Qwen)
+Redis stream ─(worker)─► embed ─► ChromaDB ◄─ query ◄─ Streamlit ─► Ollama (Qwen) or Gemini
 ```
 
-# DE_Embeddings_Example
-
-A local **Redis Streams** cache deployed with Docker. It mimics classic pub/sub (`PUBLISH` / `SUBSCRIBE`) while keeping recent messages on disk—handy for development, smoke tests, and pipelines that need short replay windows without a full message broker. A chromaDB instance will be created that is initially partially filled. As time goes on, messages will be streamed through redis, updating the vector store. At the same time, users can prompt an LLM that references this vector data store. They should see that asking the same question before a particular message is ingested, versus after that message is ingested, generally leads to different outcomes.
+A chromaDB instance will be created that is initially partially filled. As time goes on, messages will be streamed through redis, updating the vector store. At the same time, users can prompt an LLM that references this vector data store. They should see that asking the same question before a particular message is ingested, versus after that message is ingested, generally leads to different outcomes.
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2 (`docker compose`)
-- [Ollama](https://ollama.com/download) and make sure to sign into your account with `ollama signin`, and of course if you haven't made an account, do so
+- **LLM (pick one):**
+  - **Ollama (default):** [Ollama](https://ollama.com/download), sign in with `ollama signin`, and pull **Qwen** (`ollama run qwen2.5`)
+  - **Gemini (alternative):** a [Google AI Studio API key](https://aistudio.google.com/apikey) set as `GEMINI_API_KEY` in `.env` (no local Ollama required)
 - Optional: Python 3.10+ for the helper scripts and `stream_pubsub.py`
 
 0. Set up environment:
@@ -70,17 +70,21 @@ A local **Redis Streams** cache deployed with Docker. It mimics classic pub/sub 
 
 3. Query the Semi-Filled LLM in Streamlit App:
    
-   Right now, the chromaDB has been filled with the chunks we've already seeded earlier in [step 2](#Semi-fill_ChromaDB). We're going to launch the streamlit app, and through the interface there, we can run a query that prompts our locally hosted LLM. **Before doing this step, ensure Ollama is currently running and that you have the correct model**:
-   ```bash
-   ollama list
-   ```
-   This should return something like
-   ```bash
-   NAME              ID              SIZE      MODIFIED      
-   qwen2.5:latest    845dbda0ea48    4.7 GB    3 seconds ago  
-   ```
+   Right now, the chromaDB has been filled with the chunks we've already seeded earlier in [step 2](#Semi-fill_ChromaDB). We're going to launch the streamlit app, and through the interface there, we can run a query that prompts our LLM.
 
-   With that green light, we should be able to run the streamlit app. **Please run**:
+   **LLM setup (Ollama or Gemini):**
+   - **Ollama + Qwen (default):** ensure Ollama is running and the model is pulled:
+     ```bash
+     ollama list
+     ```
+     Expect something like:
+     ```bash
+     NAME              ID              SIZE      MODIFIED      
+     qwen2.5:latest    845dbda0ea48    4.7 GB    3 seconds ago  
+     ```
+   - **Gemini (alternative):** copy `.env.example` to `.env`, set `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`). Leave `GEMINI_API_KEY` empty to keep using Ollama/Qwen.
+
+   With the LLM configured, we should be able to run the streamlit app. **Please run**:
    ```bash
    cd app # Change directory to the app
    streamlit run streamlit_app.py
@@ -177,16 +181,11 @@ Set these in `.env` (see `.env.example`):
 | `REDIS_PORT` | `6379` | Host port mapped to the container |
 | `REDIS_URL` | `redis://localhost:6379/0` | Connection string for Python clients |
 | `REDIS_STREAM_PREFIX` | `pubsub` | Key prefix; channel `events` → stream `pubsub:events` |
-
-## Configuration
-
-Set these in `.env` (see `.env.example`):
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `REDIS_PORT` | `6379` | Host port mapped to the container |
-| `REDIS_URL` | `redis://localhost:6379/0` | Connection string for Python clients |
-| `REDIS_STREAM_PREFIX` | `pubsub` | Key prefix; channel `events` → stream `pubsub:events` |
+| `GEMINI_API_KEY` | _(empty)_ | If set → Gemini; if empty → Ollama |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model name |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama API base URL |
+| `OLLAMA_MODEL` | `qwen2.5` | Ollama model tag |
+| `OLLAMA_API_KEY` | _(empty)_ | Optional Bearer token for Ollama Cloud / auth |
 
 ## Stream-backed pub/sub model
 
@@ -274,12 +273,12 @@ only run the instant parts:
 
 1. **Pub/sub → live embed:** publish a message and watch the worker embed it into Chroma.
 2. **RAG app:** ask the Streamlit app a question; it retrieves from Chroma and answers via
-   the students' local Qwen model.
+   the configured LLM (local **Qwen** through Ollama, or **Gemini** if `GEMINI_API_KEY` is set).
 
 Nothing in the showcase touches HuggingFace, so the throttle can't bite mid-demo.
 
-> Measured on Apple Silicon: embedding sustains ~140 docs/s, retrieval + a Qwen answer is
-> a couple of seconds. The only slow step (dataset download) is done in prep.
+> Measured on Apple Silicon: embedding sustains ~140 docs/s, retrieval + an LLM answer (Qwen
+> or Gemini) is a couple of seconds. The only slow step (dataset download) is done in prep.
 
 ## RAG pipeline: dataset → ChromaDB → query
 
@@ -333,32 +332,48 @@ The worker logs each upsert and the running collection count.
 
 ### 3. Query it: Streamlit RAG app
 
-Embeds your question, retrieves top-k context from Chroma, and answers with a local Qwen
-model served by **Ollama**.
+Embeds your question, retrieves top-k context from Chroma, and answers with the LLM
+inferred from API keys in `.env`:
+
+| Condition | Backend | What you need |
+|-----------|---------|----------------|
+| `GEMINI_API_KEY` is set | Gemini | Key from [AI Studio](https://aistudio.google.com/apikey) |
+| `GEMINI_API_KEY` empty (default) | Ollama | `ollama run qwen2.5` (optional `OLLAMA_API_KEY` for cloud) |
 
 ```bash
-ollama run qwen2.5                      # pull/serve the model (any Qwen tag; set OLLAMA_MODEL)
+cp .env.example .env
+# Ollama (default) — leave GEMINI_API_KEY empty
+ollama run qwen2.5
+
+# Or Gemini — set in .env:
+# GEMINI_API_KEY=your-key
+# GEMINI_MODEL=gemini-2.0-flash
+
 streamlit run app/streamlit_app.py
 ```
 
-The sidebar shows the collection size and model; retrieved sources are shown per answer.
+The sidebar shows the collection size, active LLM provider, and retrieved sources per answer.
 
 ## Use in your own code
 
-Import `stream_pubsub` from the repo root (or add the project to `PYTHONPATH`):
+**Redis streams** (`stream_pubsub.py`):
 
 ```python
 from stream_pubsub import publish, subscribe
 
 publish("events", '{"type":"embedding","id":1}')
-
 for entry_id, message in subscribe("events"):
     print(entry_id, message)
 ```
 
-- `publish(channel, message, url=..., prefix=..., maxlen=...)` — returns the stream entry id.
-- `subscribe(channel, block_ms=5000, last_id="$")` — blocking iterator of `(entry_id, message)`.
-- `stream_key(channel)` — resolves `pubsub:<channel>` using `REDIS_STREAM_PREFIX`.
+**LLM answers** (`llm_client.py` — Gemini if `GEMINI_API_KEY` is set, else Ollama):
+
+```python
+from llm_client import stream_answer, complete_answer
+
+for token in stream_answer("Context: …\n\nQuestion: …?"):
+    print(token, end="")
+```
 
 ## Operations
 
@@ -376,11 +391,12 @@ Data is stored in the Docker volume `redis-stream-data` (see `docker-compose.yml
 | `docker-compose.yml` | Redis 7 Alpine service, healthcheck, persistent volume |
 | `redis/redis.conf` | AOF persistence, dev memory cap (256MB) |
 | `stream_pubsub.py` | `publish` / `subscribe` wrapper over `XADD` / `XREAD` |
+| `llm_client.py` | Ollama or Gemini generation (auto from API keys in `.env`) |
 | `rag_common.py` | Shared embedding + Chroma helpers and the row→document transform |
 | `scripts/demo_publish.py` | CLI publish smoke test |
 | `scripts/demo_subscribe.py` | CLI subscribe smoke test |
 | `scripts/load_dataset_to_chroma.py` | Bulk-seed ChromaDB from the dataset (streaming) |
 | `scripts/embed_worker.py` | Consume stream → transform → embed → store in ChromaDB |
-| `app/streamlit_app.py` | RAG chat app (ChromaDB retrieval + Qwen via Ollama) |
-| `requirements.txt` | Python deps (`redis`, `chromadb`, `datasets`, `sentence-transformers`, `streamlit`, `requests`) |
+| `app/streamlit_app.py` | RAG chat app (ChromaDB retrieval + Qwen via Ollama or Gemini) |
+| `requirements.txt` | Python deps (`redis`, `chromadb`, `datasets`, `sentence-transformers`, `streamlit`, `google-genai`, …) |
 | `.env.example` | Sample environment variables |
