@@ -1,5 +1,7 @@
 # DE_Embeddings_Example
 
+This is a continuation from the presentation that can be found [here](https://docs.google.com/presentation/d/1jsSaZ8JniIFkEswq2Y5EF7ErV6qztp7lmp32rmjCmIo/edit?usp=sharing)
+
 A local **Redis Streams** cache deployed with Docker. It mimics classic pub/sub (`PUBLISH` / `SUBSCRIBE`) while keeping recent messages on disk—handy for development, smoke tests, and pipelines that need short replay windows without a full message broker.
 
 On top of that, this repo is an end-to-end **RAG demo**: seed a containerized **ChromaDB** with embeddings from a dataset, stream new messages through Redis into Chroma, and query it all from a **Streamlit** app backed by an LLM—**Qwen** via local **Ollama** (default) or **Gemini** when `GEMINI_API_KEY` is set in `.env`.
@@ -11,6 +13,8 @@ Redis stream ─(worker)─► embed ─► ChromaDB ◄─ query ◄─ Streaml
 ```
 
 A chromaDB instance will be created that is initially partially filled. As time goes on, messages will be streamed through redis, updating the vector store. At the same time, users can prompt an LLM that references this vector data store. They should see that asking the same question before a particular message is ingested, versus after that message is ingested, generally leads to different outcomes.
+
+# Walkthrough Start
 
 ## Prerequisites
 
@@ -171,6 +175,23 @@ A chromaDB instance will be created that is initially partially filled. As time 
    docker compose down          # stop container, keep data volume
    docker compose down -v       # stop and delete persisted stream data
    ```
+
+## End Walkthrough
+
+Congratulations. You've made it to the end. What goes on past here is a set of extensions, then the explanation for files and settings you might want to play around with. Also, if you want to try and have the whole thing done for you automatically, you can use the shell script that does everything!
+```shell
+run_demo.sh
+```
+
+## Extend Your Understanding
+
+Most of this focused on getting a stable streaming to vector-db going. This whole project could be refined further. Here are some ideas you can implement that'll actually make this resume-worthy:
+1. **Add Metadata-Aware retrieval**: Add fields like `source`, `timestamp`, `topic`, `patient_id`, etc. to help modify the retrieval use. That can lead to it being semantic similarity + metadata filtering, allowing the RAG to help 'retrieve only chunks from cardiology notes.'
+2. **Implement Multiple Redis Topics**: This was alluded to before, but having topic-specific ingestion (and maybe even tying it in with the above suggestion) helps mirror real healthcare pipelines.
+3. **Add a 'Relevance Feedback Loop'**: You've seen it in almost all the well working LLMs. Add a 👍 if helpful, or 👎if not, and stream that feedback through Redis back to Chroma as metadata, improving the RAG, making it human informed.
+4. **Add Recency-Boosted Retrieval**: Sometimes the fresher chunks will be more relevant, so have recency play some weight for the score of chunks to retrieve.
+5. **Swap the Embedding Model**: This is slightly more data science savy. You can run evaluations on different embedding models to determine which one is best for the use case. Do you want to prioritize speed over accuracy? Or maybe which one leads to less tokens overall being used? Run tests with different embeddings and find out which works, and maybe why!
+
 
 ## Configuration
 
